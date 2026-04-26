@@ -1,13 +1,15 @@
 const express = require("express");
 const cheerio = require("cheerio");
+const { chromium } = require("playwright");
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 
-const { chromium } = require("playwright");
-
 const PORT = Number(process.env.PORT || 3000);
-const API_KEY = process.env.PUBLIC_VENDOR_ADAPTER_API_KEY || process.env.ADAPTER_API_KEY || "";
+const API_KEY =
+  process.env.PUBLIC_VENDOR_ADAPTER_API_KEY ||
+  process.env.ADAPTER_API_KEY ||
+  "";
 
 const DEFAULT_HEADERS = {
   "user-agent":
@@ -52,7 +54,9 @@ const VENDORS = {
   jme: {
     displayName: "JME Ellsworth",
     domains: ["jmesales.com"],
-    searchUrls: (part) => [`https://www.jmesales.com/search.php?search_query=${encodeURIComponent(part)}`]
+    searchUrls: (part) => [
+      `https://www.jmesales.com/search.php?search_query=${encodeURIComponent(part)}`
+    ]
   },
   commercialindsupply: {
     displayName: "Commercial Ind. Supply",
@@ -121,13 +125,18 @@ app.post("/vendor/product", async (req, res) => {
 
     const vendor = VENDORS[vendorKey];
     if (!vendor) {
-      return res.status(400).json({ ok: false, error: `Unsupported vendorKey: ${vendorKey}` });
+      return res
+        .status(400)
+        .json({ ok: false, error: `Unsupported vendorKey: ${vendorKey}` });
     }
 
     const result = await lookupVendorProduct(vendorKey, vendorPartNumber, includePrice);
     return res.json(result);
   } catch (error) {
-    return res.status(500).json({
+    const statusCode =
+      error && Number.isInteger(error.statusCode) ? error.statusCode : 500;
+
+    return res.status(statusCode).json({
       ok: false,
       error: error instanceof Error ? error.message : String(error)
     });
@@ -190,21 +199,60 @@ async function lookupVendorProduct(vendorKey, vendorPartNumber, includePrice) {
 
   for (const searchUrl of searchUrls) {
     try {
-      const searchPage = await fetchHtml(searchUrl);
-      const candidateUrls = extractCandidateUrls(vendorKey, searchPage.url, searchPage.html, vendorPartNumber);
+      let searchPage;
+      try {
+        searchPage = await fetchHtml(searchUrl);
+      } catch (error) {
+        if (shouldUseBrowserFallback(vendorKey, error)) {
+          searchPage = await fetchHtmlWithBrowser(searchUrl);
+        } else {
+          throw error;
+        }
+      }
+
+      const candidateUrls = extractCandidateUrls(
+        vendorKey,
+        searchPage.url,
+        searchPage.html,
+        vendorPartNumber
+      );
 
       for (const candidateUrl of candidateUrls.slice(0, 8)) {
         try {
-          const productPage = await fetchHtml(candidateUrl);
-          const parsed = parseProductPage(vendorKey, productPage.url, productPage.html, vendorPartNumber);
+          let productPage;
+          try {
+            productPage = await fetchHtml(candidateUrl);
+          } catch (error) {
+            if (shouldUseBrowserFallback(vendorKey, error)) {
+              productPage = await fetchHtmlWithBrowser(candidateUrl);
+            } else {
+              throw error;
+            }
+          }
+
+          const parsed = parseProductPage(
+            vendorKey,
+            productPage.url,
+            productPage.html,
+            vendorPartNumber
+          );
 
           if (!parsed) {
-            attempts.push({ targetUrl: candidateUrl, error: "parseProductPage returned null" });
+            attempts.push({
+              targetUrl: candidateUrl,
+              error: "parseProductPage returned null"
+            });
             continue;
           }
 
-          if (includePrice && (!Number.isFinite(parsed.unitCost) || parsed.unitCost <= 0)) {
-            attempts.push({ targetUrl: candidateUrl, error: `invalid non-positive unitCost: ${parsed.unitCost}` });
+          if (
+            includePrice &&
+            (!Number.isFinite(parsed.unitCost) || parsed.unitCost <= 0)
+          ) {
+            attempts.push({
+              targetUrl: candidateUrl,
+              error: `invalid non-positive unitCost: ${parsed.unitCost}`
+            });
             continue;
           }
 
@@ -215,7 +263,11 @@ async function lookupVendorProduct(vendorKey, vendorPartNumber, includePrice) {
               vendorPartNumber
           );
 
-          const resolvedOk = resolvedVendorPartNo === normalizedRequested || resolvedVendorPartNo.includes(normalizedRequested) || normalizedRequested.includes(resolvedVendorPartNo);
+          const resolvedOk =
+            resolvedVendorPartNo === normalizedRequested ||
+            resolvedVendorPartNo.includes(normalizedRequested) ||
+            normalizedRequested.includes(resolvedVendorPartNo);
+
           if (!resolvedOk) {
             attempts.push({
               targetUrl: candidateUrl,
@@ -280,6 +332,62 @@ async function fetchHtml(url) {
     url: response.url || url,
     html
   };
+}
+
+async function fetchHtmlWithBrowser(url) {
+  const browser = await chromium.launch({
+    headless: true
+  });
+
+  const page = await browser.newPage({
+    userAgent: DEFAULT_HEADERS["user-agent"]
+  });
+
+  try {
+    await page.goto(url, {
+      waitUntil: "domcontentloaded",
+      timeout: 45000
+    });
+
+    await page.waitForTimeout(2500);
+
+    const finalUrl = page.url();
+    const html = await page.content();
+
+    if (/captcha|access denied|robot check|are you a robot|verify you are human/i.test(html)) {
+      throw new Error("Vendor blocked the browser request with anti-bot or verification page");
+    }
+
+    return {
+      url: finalUrl,
+      html
+    };
+  } finally {
+    await page.close().catch(() => {});
+    await browser.close().catch(() => {});
+  }
+}
+
+function shouldUseBrowserFallback(vendorKey, error) {
+  const msg = String(error?.message || error || "").toLowerCase();
+
+  const browserPreferredVendors = new Set([
+    "automationdirect",
+    "grainger",
+    "amazon"
+  ]);
+
+  if (browserPreferredVendors.has(vendorKey)) {
+    return true;
+  }
+
+  return (
+    msg.includes("fetch failed") ||
+    msg.includes("captcha") ||
+    msg.includes("access denied") ||
+    msg.includes("robot") ||
+    msg.includes("verification")
+  );
 }
 
 function extractCandidateUrls(vendorKey, pageUrl, html, vendorPartNumber) {
@@ -352,12 +460,23 @@ function parseProductPage(vendorKey, pageUrl, html, vendorPartNumber) {
     firstNonEmpty(
       $("meta[property='og:image']").attr("content"),
       $("img[itemprop='image']").attr("src"),
-      $("img").filter((_, img) => /product|hero|primary/i.test(String($(img).attr("class") || ""))).first().attr("src")
+      $("img")
+        .filter((_, img) =>
+          /product|hero|primary/i.test(String($(img).attr("class") || ""))
+        )
+        .first()
+        .attr("src")
     )
   );
 
   const unitOfMeasure = detectUnitOfMeasure($, jsonLd);
-  const resolvedVendorPartNo = detectResolvedPartNumber(pageUrl, $, jsonLd, vendorPartNumber, vendorKey);
+  const resolvedVendorPartNo = detectResolvedPartNumber(
+    pageUrl,
+    $,
+    jsonLd,
+    vendorPartNumber,
+    vendorKey
+  );
   const unitCost = detectUnitCost($, jsonLd, metaPrice, vendorKey);
 
   return {
