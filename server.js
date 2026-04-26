@@ -5,7 +5,10 @@ const app = express();
 app.use(express.json({ limit: "1mb" }));
 
 const PORT = Number(process.env.PORT || 3000);
-const API_KEY = process.env.PUBLIC_VENDOR_ADAPTER_API_KEY || process.env.ADAPTER_API_KEY || "";
+const API_KEY =
+  process.env.PUBLIC_VENDOR_ADAPTER_API_KEY ||
+  process.env.ADAPTER_API_KEY ||
+  "";
 
 const DEFAULT_HEADERS = {
   "user-agent":
@@ -56,7 +59,9 @@ const VENDORS = {
     displayName: "JME Ellsworth",
     domains: ["jmesales.com"],
     executionPath: "hosted_fetch",
-    searchUrls: (part) => [`https://www.jmesales.com/search.php?search_query=${encodeURIComponent(part)}`]
+    searchUrls: (part) => [
+      `https://www.jmesales.com/search.php?search_query=${encodeURIComponent(part)}`
+    ]
   },
   commercialindsupply: {
     displayName: "Commercial Ind. Supply",
@@ -129,7 +134,9 @@ app.post("/vendor/product", async (req, res) => {
 
     const vendor = VENDORS[vendorKey];
     if (!vendor) {
-      return res.status(400).json({ ok: false, error: `Unsupported vendorKey: ${vendorKey}` });
+      return res
+        .status(400)
+        .json({ ok: false, error: `Unsupported vendorKey: ${vendorKey}` });
     }
 
     assertHostedExecutionAllowed(vendorKey);
@@ -137,7 +144,9 @@ app.post("/vendor/product", async (req, res) => {
     const result = await lookupVendorProduct(vendorKey, vendorPartNumber, includePrice);
     return res.json(result);
   } catch (error) {
-    const statusCode = error && Number.isInteger(error.statusCode) ? error.statusCode : 500;
+    const statusCode =
+      error && Number.isInteger(error.statusCode) ? error.statusCode : 500;
+
     return res.status(statusCode).json({
       ok: false,
       error: error instanceof Error ? error.message : String(error)
@@ -217,20 +226,36 @@ async function lookupVendorProduct(vendorKey, vendorPartNumber, includePrice) {
   for (const searchUrl of searchUrls) {
     try {
       const searchPage = await fetchHtml(searchUrl);
-      const candidateUrls = extractCandidateUrls(vendorKey, searchPage.url, searchPage.html, vendorPartNumber);
+      const candidateUrls = extractCandidateUrls(
+        vendorKey,
+        searchPage.url,
+        searchPage.html,
+        vendorPartNumber
+      );
 
       for (const candidateUrl of candidateUrls.slice(0, 8)) {
         try {
           const productPage = await fetchHtml(candidateUrl);
-          const parsed = parseProductPage(vendorKey, productPage.url, productPage.html, vendorPartNumber);
+          const parsed = parseProductPage(
+            vendorKey,
+            productPage.url,
+            productPage.html,
+            vendorPartNumber
+          );
 
           if (!parsed) {
             attempts.push({ targetUrl: candidateUrl, error: "parseProductPage returned null" });
             continue;
           }
 
-          if (includePrice && (!Number.isFinite(parsed.unitCost) || parsed.unitCost <= 0)) {
-            attempts.push({ targetUrl: candidateUrl, error: `invalid non-positive unitCost: ${parsed.unitCost}` });
+          if (
+            includePrice &&
+            (!Number.isFinite(parsed.unitCost) || parsed.unitCost <= 0)
+          ) {
+            attempts.push({
+              targetUrl: candidateUrl,
+              error: `invalid non-positive unitCost: ${parsed.unitCost}`
+            });
             continue;
           }
 
@@ -382,12 +407,23 @@ function parseProductPage(vendorKey, pageUrl, html, vendorPartNumber) {
     firstNonEmpty(
       $("meta[property='og:image']").attr("content"),
       $("img[itemprop='image']").attr("src"),
-      $("img").filter((_, img) => /product|hero|primary/i.test(String($(img).attr("class") || ""))).first().attr("src")
+      $("img")
+        .filter((_, img) =>
+          /product|hero|primary/i.test(String($(img).attr("class") || ""))
+        )
+        .first()
+        .attr("src")
     )
   );
 
   const unitOfMeasure = detectUnitOfMeasure($, jsonLd);
-  const resolvedVendorPartNo = detectResolvedPartNumber(pageUrl, $, jsonLd, vendorPartNumber, vendorKey);
+  const resolvedVendorPartNo = detectResolvedPartNumber(
+    pageUrl,
+    $,
+    jsonLd,
+    vendorPartNumber,
+    vendorKey
+  );
   const unitCost = detectUnitCost($, jsonLd, metaPrice, vendorKey);
 
   return {
@@ -609,3 +645,13 @@ function normalizePart(value) {
     .replace(/\s+/g, "")
     .replace(/\/+$/g, "");
 }
+```
+
+Then save `server.js`, run:
+
+```powershell
+cd C:\workers\public-vendor-adapter-web
+git status
+git add .\server.js
+git commit -m "Block AutomationDirect from hosted adapter"
+git push
