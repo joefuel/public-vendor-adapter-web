@@ -4,6 +4,8 @@ const cheerio = require("cheerio");
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 
+const { chromium } = require("playwright");
+
 const PORT = Number(process.env.PORT || 3000);
 const API_KEY = process.env.PUBLIC_VENDOR_ADAPTER_API_KEY || process.env.ADAPTER_API_KEY || "";
 
