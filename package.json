@@ -1,0 +1,13 @@
+{
+  "name": "public-vendor-adapter-web",
+  "version": "1.0.0",
+  "description": "Public vendor lookup adapter for Cloudflare OT worker",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "cheerio": "^1.0.0",
+    "express": "^4.19.2"
+  }
+}
