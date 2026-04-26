@@ -645,13 +645,3 @@ function normalizePart(value) {
     .replace(/\s+/g, "")
     .replace(/\/+$/g, "");
 }
-```
-
-Then save `server.js`, run:
-
-```powershell
-cd C:\workers\public-vendor-adapter-web
-git status
-git add .\server.js
-git commit -m "Block AutomationDirect from hosted adapter"
-git push
