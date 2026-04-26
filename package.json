@@ -4,10 +4,12 @@
   "description": "Public vendor lookup adapter for Cloudflare OT worker",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "postinstall": "npx playwright install --only-shell chromium"
   },
   "dependencies": {
     "cheerio": "^1.0.0",
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "playwright": "^1.53.0"
   }
 }
