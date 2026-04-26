@@ -1,15 +1,11 @@
 const express = require("express");
 const cheerio = require("cheerio");
-const { chromium } = require("playwright");
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 
 const PORT = Number(process.env.PORT || 3000);
-const API_KEY =
-  process.env.PUBLIC_VENDOR_ADAPTER_API_KEY ||
-  process.env.ADAPTER_API_KEY ||
-  "";
+const API_KEY = process.env.PUBLIC_VENDOR_ADAPTER_API_KEY || process.env.ADAPTER_API_KEY || "";
 
 const DEFAULT_HEADERS = {
   "user-agent":
@@ -26,6 +22,7 @@ const VENDORS = {
   automationdirect: {
     displayName: "AutomationDirect",
     domains: ["automationdirect.com"],
+    executionPath: "local_only",
     searchUrls: (part) => [
       `https://www.automationdirect.com/adc/search/search?query=${encodeURIComponent(part)}`,
       `https://www.automationdirect.com/adc/shopping/search?term=${encodeURIComponent(part)}`
@@ -34,33 +31,37 @@ const VENDORS = {
   zoro: {
     displayName: "Zoro",
     domains: ["zoro.com"],
+    executionPath: "hosted_fetch",
     searchUrls: (part) => [`https://www.zoro.com/search?q=${encodeURIComponent(part)}`]
   },
   grainger: {
     displayName: "Grainger",
     domains: ["grainger.com"],
+    executionPath: "hosted_fetch",
     searchUrls: (part) => [`https://www.grainger.com/search?searchQuery=${encodeURIComponent(part)}`]
   },
   homedepot: {
     displayName: "Home Depot",
     domains: ["homedepot.com"],
+    executionPath: "hosted_fetch",
     searchUrls: (part) => [`https://www.homedepot.com/s/${encodeURIComponent(part)}`]
   },
   amazon: {
     displayName: "Amazon",
     domains: ["amazon.com"],
+    executionPath: "hosted_fetch",
     searchUrls: (part) => [`https://www.amazon.com/s?k=${encodeURIComponent(part)}`]
   },
   jme: {
     displayName: "JME Ellsworth",
     domains: ["jmesales.com"],
-    searchUrls: (part) => [
-      `https://www.jmesales.com/search.php?search_query=${encodeURIComponent(part)}`
-    ]
+    executionPath: "hosted_fetch",
+    searchUrls: (part) => [`https://www.jmesales.com/search.php?search_query=${encodeURIComponent(part)}`]
   },
   commercialindsupply: {
     displayName: "Commercial Ind. Supply",
     domains: ["commercialindsupply.com"],
+    executionPath: "hosted_fetch",
     searchUrls: (part) => [
       `https://commercialindsupply.com/search.php?search_query=${encodeURIComponent(part)}`,
       `https://www.bing.com/search?q=${encodeURIComponent(`site:commercialindsupply.com ${part}`)}`
@@ -69,6 +70,7 @@ const VENDORS = {
   wicvalve: {
     displayName: "WIC Valve",
     domains: ["wicvalve.com"],
+    executionPath: "hosted_fetch",
     searchUrls: (part) => [
       `https://www.bing.com/search?q=${encodeURIComponent(`site:wicvalve.com ${part}`)}`
     ]
@@ -76,6 +78,7 @@ const VENDORS = {
   geminivalve: {
     displayName: "Gemini Valve",
     domains: ["geminivalve.com"],
+    executionPath: "hosted_fetch",
     searchUrls: (part) => [
       `https://www.bing.com/search?q=${encodeURIComponent(`site:geminivalve.com ${part}`)}`
     ]
@@ -83,6 +86,7 @@ const VENDORS = {
   sourcenorthamerica: {
     displayName: "Source North America Corp",
     domains: ["sourcenorthamerica.com"],
+    executionPath: "hosted_fetch",
     searchUrls: (part) => [
       `https://www.bing.com/search?q=${encodeURIComponent(`site:sourcenorthamerica.com ${part}`)}`
     ]
@@ -125,17 +129,15 @@ app.post("/vendor/product", async (req, res) => {
 
     const vendor = VENDORS[vendorKey];
     if (!vendor) {
-      return res
-        .status(400)
-        .json({ ok: false, error: `Unsupported vendorKey: ${vendorKey}` });
+      return res.status(400).json({ ok: false, error: `Unsupported vendorKey: ${vendorKey}` });
     }
+
+    assertHostedExecutionAllowed(vendorKey);
 
     const result = await lookupVendorProduct(vendorKey, vendorPartNumber, includePrice);
     return res.json(result);
   } catch (error) {
-    const statusCode =
-      error && Number.isInteger(error.statusCode) ? error.statusCode : 500;
-
+    const statusCode = error && Number.isInteger(error.statusCode) ? error.statusCode : 500;
     return res.status(statusCode).json({
       ok: false,
       error: error instanceof Error ? error.message : String(error)
@@ -191,6 +193,21 @@ function normalizeVendorKey(value) {
   return aliasMap[raw] || raw.replace(/\s+/g, "");
 }
 
+function assertHostedExecutionAllowed(vendorKey) {
+  const vendor = VENDORS[vendorKey];
+  if (!vendor) {
+    throw new Error(`Unsupported vendorKey: ${vendorKey}`);
+  }
+
+  if (vendor.executionPath === "local_only") {
+    const err = new Error(
+      `${vendor.displayName} is blocked from the hosted adapter. Use the local/browser automation path for lookup, then keep Cloudflare OT write-back separate.`
+    );
+    err.statusCode = 409;
+    throw err;
+  }
+}
+
 async function lookupVendorProduct(vendorKey, vendorPartNumber, includePrice) {
   const vendor = VENDORS[vendorKey];
   const searchUrls = vendor.searchUrls(vendorPartNumber);
@@ -199,60 +216,21 @@ async function lookupVendorProduct(vendorKey, vendorPartNumber, includePrice) {
 
   for (const searchUrl of searchUrls) {
     try {
-      let searchPage;
-      try {
-        searchPage = await fetchHtml(searchUrl);
-      } catch (error) {
-        if (shouldUseBrowserFallback(vendorKey, error)) {
-          searchPage = await fetchHtmlWithBrowser(searchUrl);
-        } else {
-          throw error;
-        }
-      }
-
-      const candidateUrls = extractCandidateUrls(
-        vendorKey,
-        searchPage.url,
-        searchPage.html,
-        vendorPartNumber
-      );
+      const searchPage = await fetchHtml(searchUrl);
+      const candidateUrls = extractCandidateUrls(vendorKey, searchPage.url, searchPage.html, vendorPartNumber);
 
       for (const candidateUrl of candidateUrls.slice(0, 8)) {
         try {
-          let productPage;
-          try {
-            productPage = await fetchHtml(candidateUrl);
-          } catch (error) {
-            if (shouldUseBrowserFallback(vendorKey, error)) {
-              productPage = await fetchHtmlWithBrowser(candidateUrl);
-            } else {
-              throw error;
-            }
-          }
-
-          const parsed = parseProductPage(
-            vendorKey,
-            productPage.url,
-            productPage.html,
-            vendorPartNumber
-          );
+          const productPage = await fetchHtml(candidateUrl);
+          const parsed = parseProductPage(vendorKey, productPage.url, productPage.html, vendorPartNumber);
 
           if (!parsed) {
-            attempts.push({
-              targetUrl: candidateUrl,
-              error: "parseProductPage returned null"
-            });
+            attempts.push({ targetUrl: candidateUrl, error: "parseProductPage returned null" });
             continue;
           }
 
-          if (
-            includePrice &&
-            (!Number.isFinite(parsed.unitCost) || parsed.unitCost <= 0)
-          ) {
-            attempts.push({
-              targetUrl: candidateUrl,
-              error: `invalid non-positive unitCost: ${parsed.unitCost}`
-            });
+          if (includePrice && (!Number.isFinite(parsed.unitCost) || parsed.unitCost <= 0)) {
+            attempts.push({ targetUrl: candidateUrl, error: `invalid non-positive unitCost: ${parsed.unitCost}` });
             continue;
           }
 
@@ -334,62 +312,6 @@ async function fetchHtml(url) {
   };
 }
 
-async function fetchHtmlWithBrowser(url) {
-  const browser = await chromium.launch({
-    headless: true
-  });
-
-  const page = await browser.newPage({
-    userAgent: DEFAULT_HEADERS["user-agent"]
-  });
-
-  try {
-    await page.goto(url, {
-      waitUntil: "domcontentloaded",
-      timeout: 45000
-    });
-
-    await page.waitForTimeout(2500);
-
-    const finalUrl = page.url();
-    const html = await page.content();
-
-    if (/captcha|access denied|robot check|are you a robot|verify you are human/i.test(html)) {
-      throw new Error("Vendor blocked the browser request with anti-bot or verification page");
-    }
-
-    return {
-      url: finalUrl,
-      html
-    };
-  } finally {
-    await page.close().catch(() => {});
-    await browser.close().catch(() => {});
-  }
-}
-
-function shouldUseBrowserFallback(vendorKey, error) {
-  const msg = String(error?.message || error || "").toLowerCase();
-
-  const browserPreferredVendors = new Set([
-    "automationdirect",
-    "grainger",
-    "amazon"
-  ]);
-
-  if (browserPreferredVendors.has(vendorKey)) {
-    return true;
-  }
-
-  return (
-    msg.includes("fetch failed") ||
-    msg.includes("captcha") ||
-    msg.includes("access denied") ||
-    msg.includes("robot") ||
-    msg.includes("verification")
-  );
-}
-
 function extractCandidateUrls(vendorKey, pageUrl, html, vendorPartNumber) {
   const vendor = VENDORS[vendorKey];
   const requested = normalizePart(vendorPartNumber);
@@ -460,23 +382,12 @@ function parseProductPage(vendorKey, pageUrl, html, vendorPartNumber) {
     firstNonEmpty(
       $("meta[property='og:image']").attr("content"),
       $("img[itemprop='image']").attr("src"),
-      $("img")
-        .filter((_, img) =>
-          /product|hero|primary/i.test(String($(img).attr("class") || ""))
-        )
-        .first()
-        .attr("src")
+      $("img").filter((_, img) => /product|hero|primary/i.test(String($(img).attr("class") || ""))).first().attr("src")
     )
   );
 
   const unitOfMeasure = detectUnitOfMeasure($, jsonLd);
-  const resolvedVendorPartNo = detectResolvedPartNumber(
-    pageUrl,
-    $,
-    jsonLd,
-    vendorPartNumber,
-    vendorKey
-  );
+  const resolvedVendorPartNo = detectResolvedPartNumber(pageUrl, $, jsonLd, vendorPartNumber, vendorKey);
   const unitCost = detectUnitCost($, jsonLd, metaPrice, vendorKey);
 
   return {
