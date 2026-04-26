@@ -5,7 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "postinstall": "npx playwright install --only-shell chromium"
+    "postinstall": "PLAYWRIGHT_BROWSERS_PATH=0 npx playwright install --only-shell chromium"
   },
   "dependencies": {
     "cheerio": "^1.0.0",
