@@ -28,7 +28,8 @@ const VENDORS = {
     executionPath: "local_only",
     searchUrls: (part) => [
       `https://www.automationdirect.com/adc/search/search?query=${encodeURIComponent(part)}`,
-      `https://www.automationdirect.com/adc/shopping/search?term=${encodeURIComponent(part)}`
+      `https://www.automationdirect.com/adc/shopping/search?term=${encodeURIComponent(part)}`,
+      `https://www.bing.com/search?q=${encodeURIComponent(`site:automationdirect.com/adc/shopping/catalog ${part}`)}`
     ]
   },
   zoro: {
@@ -226,12 +227,19 @@ async function lookupVendorProduct(vendorKey, vendorPartNumber, includePrice) {
   for (const searchUrl of searchUrls) {
     try {
       const searchPage = await fetchHtml(searchUrl);
-      const candidateUrls = extractCandidateUrls(
-        vendorKey,
-        searchPage.url,
-        searchPage.html,
-        vendorPartNumber
+      let candidateUrls = [];
+
+      // Important for AutomationDirect and other vendors:
+      // exact part searches may redirect straight to the product page.
+      if (isLikelyProductUrl(vendorKey, searchPage.url, vendorPartNumber)) {
+        candidateUrls.push(searchPage.url);
+      }
+
+      candidateUrls.push(
+        ...extractCandidateUrls(vendorKey, searchPage.url, searchPage.html, vendorPartNumber)
       );
+
+      candidateUrls = uniqueBy(candidateUrls, (x) => normalizeUrlForDedupe(x));
 
       for (const candidateUrl of candidateUrls.slice(0, 8)) {
         try {
@@ -354,10 +362,27 @@ function extractCandidateUrls(vendorKey, pageUrl, html, vendorPartNumber) {
     const absolute = absolutizeUrl(pageUrl, href);
     if (!absolute) return;
 
+    if (!vendor.domains.some((d) => absolute.toLowerCase().includes(d))) return;
+
     const upperAbsolute = absolute.toUpperCase();
     const upperJoined = normalizePart(joined);
-
     let score = 0;
+
+    // #1 AutomationDirect rule:
+    // Real product pages are under /adc/shopping/catalog/.../part-number
+    // and exact part pages usually end with the requested part number.
+    if (
+      vendorKey === "automationdirect" &&
+      /\/adc\/shopping\/catalog\//i.test(absolute) &&
+      urlPathEndsWithPart(absolute, requested)
+    ) {
+      score += 250;
+    }
+
+    // Strong AutomationDirect product-page signal even if the final path has tracking.
+    if (vendorKey === "automationdirect" && /\/adc\/shopping\/catalog\//i.test(absolute)) {
+      score += 60;
+    }
 
     if (upperAbsolute.includes(requested)) score += 100;
     if (upperJoined.includes(requested)) score += 80;
@@ -365,20 +390,33 @@ function extractCandidateUrls(vendorKey, pageUrl, html, vendorPartNumber) {
     if (/\/p\/|\/product|\/products|\/item|\/itm\//i.test(absolute)) score += 25;
     if (/\/s\//i.test(absolute) && vendorKey === "homedepot") score += 10;
     if (/\/dp\//i.test(absolute) && vendorKey === "amazon") score += 40;
+
+    // Search URLs are useful as first entry points, but weak as product candidates.
     if (/search|query=|k=|searchQuery=/i.test(absolute)) score -= 20;
 
-    if (!vendor.domains.some((d) => absolute.includes(d))) return;
     if (score <= 0) return;
-
-    candidates.push({ url: absolute, score });
+    candidates.push({ url: stripTrackingHash(absolute), score });
   });
 
   return uniqueBy(
     candidates
       .sort((a, b) => b.score - a.score)
       .map((x) => x.url),
-    (x) => x
+    (x) => normalizeUrlForDedupe(x)
   );
+}
+
+function isLikelyProductUrl(vendorKey, url, vendorPartNumber) {
+  const requested = normalizePart(vendorPartNumber);
+
+  if (vendorKey === "automationdirect") {
+    return /\/adc\/shopping\/catalog\//i.test(url) && urlPathEndsWithPart(url, requested);
+  }
+
+  const upperUrl = String(url || "").toUpperCase();
+  if (!upperUrl.includes(requested)) return false;
+
+  return /\/p\/|\/product|\/products|\/item|\/itm\/|\/dp\//i.test(url);
 }
 
 function parseProductPage(vendorKey, pageUrl, html, vendorPartNumber) {
@@ -509,7 +547,10 @@ function detectResolvedPartNumber(pageUrl, $, jsonLd, vendorPartNumber, vendorKe
   candidates.push($("meta[name='sku']").attr("content"));
   candidates.push($("[itemprop='sku']").attr("content"));
   candidates.push($("[data-testid='product-sku']").text());
-  candidates.push($("body").text());
+
+  if (vendorKey === "automationdirect" && urlPathEndsWithPart(pageUrl, requested)) {
+    candidates.push(requested);
+  }
 
   for (const obj of jsonLd) {
     if (obj && typeof obj === "object") {
@@ -584,7 +625,7 @@ function pushPrice(list, raw) {
 
 function parsePrice(raw) {
   if (raw === null || raw === undefined) return null;
-  const text = String(raw).replace(/,/g, " ");
+  const text = String(raw).replace(/,/g, "");
   const match = text.match(/([0-9]+(?:\.[0-9]{2})?)/);
   if (!match) return null;
   const value = Number(match[1]);
@@ -632,10 +673,19 @@ function uniqueBy(items, keyFn) {
 }
 
 function extractPartFromUrl(url) {
-  const clean = String(url || "").toUpperCase();
-  const match = clean.match(/\/([0-9A-Z._-]{3,})\/?(?:\?|#|$)/);
-  if (!match?.[1]) return null;
-  return normalizePart(match[1]);
+  try {
+    const parsed = new URL(String(url || ""));
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    const last = parts[parts.length - 1];
+    if (!last) return null;
+    if (!/[0-9A-Z]/i.test(last)) return null;
+    return normalizePart(last);
+  } catch {
+    const clean = String(url || "").toUpperCase();
+    const match = clean.match(/\/([0-9A-Z._-]{3,})\/?(?:\?|#|$)/);
+    if (!match?.[1]) return null;
+    return normalizePart(match[1]);
+  }
 }
 
 function normalizePart(value) {
@@ -644,4 +694,40 @@ function normalizePart(value) {
     .trim()
     .replace(/\s+/g, "")
     .replace(/\/+$/g, "");
+}
+
+function normalizeUrlForDedupe(url) {
+  try {
+    const parsed = new URL(String(url || ""));
+    parsed.hash = "";
+    parsed.searchParams.delete("srsltid");
+    parsed.searchParams.delete("utm_source");
+    parsed.searchParams.delete("utm_medium");
+    parsed.searchParams.delete("utm_campaign");
+    return parsed.toString().toLowerCase();
+  } catch {
+    return String(url || "").toLowerCase();
+  }
+}
+
+function stripTrackingHash(url) {
+  try {
+    const parsed = new URL(String(url || ""));
+    parsed.hash = "";
+    parsed.searchParams.delete("srsltid");
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
+function urlPathEndsWithPart(url, normalizedPart) {
+  try {
+    const parsed = new URL(String(url || ""));
+    const pathParts = parsed.pathname.split("/").filter(Boolean);
+    const last = normalizePart(pathParts[pathParts.length - 1]);
+    return last === normalizedPart;
+  } catch {
+    return String(url || "").toUpperCase().replace(/\/+$/g, "").endsWith("/" + normalizedPart);
+  }
 }
